@@ -49,10 +49,12 @@ def log(event, status="Success", doc=None, commit=False, **fields):
 
 
 def deferred_uploads(older_than_minutes=0):
-	"""Uploads waiting for R2 (kept on disk during an outage), oldest first.
+	"""Uploads waiting for R2 (kept on disk during an outage): one entry per file, oldest first.
 
-	Each item has the file, its file_url, when it was deferred (deferred_at) and how long it
-	has waited (age_minutes). Pass older_than_minutes=60 to list only files past the alert time.
+	Keyed by file_url. A file with several deferred rows gives one entry, with the oldest
+	deferral as deferred_at and age_minutes. Each item has file, file_name, file_url,
+	deferred_at, age_minutes and log (the oldest row). Pass older_than_minutes=60 to list
+	only files past the alert time.
 	"""
 	rows = frappe.get_all(
 		DOCTYPE,
@@ -60,9 +62,13 @@ def deferred_uploads(older_than_minutes=0):
 		fields=["name", "file", "file_name", "from_location", "creation"],
 		order_by="creation asc",
 	)
+	# rows are oldest first, so the first row seen for a file_url is its oldest deferral
+	first_by_url = {}
+	for row in rows:
+		first_by_url.setdefault(row.from_location, row)
 	now = now_datetime()
 	out = []
-	for row in rows:
+	for row in first_by_url.values():
 		age = time_diff_in_seconds(now, row.creation) / 60
 		if age < older_than_minutes:
 			continue
@@ -80,8 +86,18 @@ def deferred_uploads(older_than_minutes=0):
 
 
 def purge_old_logs():
-	"""Daily: delete log rows older than the configured retention (0 keeps them forever)."""
+	"""Daily: delete log rows older than the configured retention (0 keeps them forever).
+
+	Deferred rows are never purged. They are the only record of a file waiting for R2, and
+	the retry needs their r2_key, so they stay until the upload succeeds or is skipped.
+	"""
 	days = cint(frappe.db.get_single_value("Cloudflare R2 Settings", "file_log_retention_days"))
 	if days <= 0:
 		return
-	frappe.db.delete(DOCTYPE, {"creation": ("<", add_days(now_datetime(), -days))})
+	frappe.db.delete(
+		DOCTYPE,
+		{
+			"creation": ("<", add_days(now_datetime(), -days)),
+			"status": ("!=", "Deferred"),
+		},
+	)
