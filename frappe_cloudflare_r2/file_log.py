@@ -7,7 +7,7 @@ Logging must never break the file operation it describes, so every write is wrap
 """
 
 import frappe
-from frappe.utils import add_days, cint, now_datetime
+from frappe.utils import add_days, cint, now_datetime, time_diff_in_seconds
 
 DOCTYPE = "R2 File Log"
 
@@ -46,6 +46,37 @@ def log(event, status="Success", doc=None, commit=False, **fields):
 			frappe.db.commit()  # nosemgrep
 	except Exception:
 		frappe.logger("frappe_cloudflare_r2").exception(f"Could not write {DOCTYPE} ({event})")
+
+
+def deferred_uploads(older_than_minutes=0):
+	"""Uploads waiting for R2 (kept on disk during an outage), oldest first.
+
+	Each item has the file, its file_url, when it was deferred (deferred_at) and how long it
+	has waited (age_minutes). Pass older_than_minutes=60 to list only files past the alert time.
+	"""
+	rows = frappe.get_all(
+		DOCTYPE,
+		filters={"event": "Upload Deferred", "status": "Deferred"},
+		fields=["name", "file", "file_name", "from_location", "creation"],
+		order_by="creation asc",
+	)
+	now = now_datetime()
+	out = []
+	for row in rows:
+		age = time_diff_in_seconds(now, row.creation) / 60
+		if age < older_than_minutes:
+			continue
+		out.append(
+			{
+				"log": row.name,
+				"file": row.file,
+				"file_name": row.file_name,
+				"file_url": row.from_location,
+				"deferred_at": row.creation,
+				"age_minutes": round(age, 1),
+			}
+		)
+	return out
 
 
 def purge_old_logs():
